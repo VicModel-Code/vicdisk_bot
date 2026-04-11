@@ -119,7 +119,15 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_files_group_id ON files(group_id);
         CREATE INDEX IF NOT EXISTS idx_codes_group_id ON codes(group_id);
 
+        CREATE TABLE IF NOT EXISTS welcome_config (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            text        TEXT DEFAULT '',
+            media_file_id TEXT DEFAULT '',
+            media_type  TEXT DEFAULT ''
+        );
+
         INSERT OR IGNORE INTO watermark_config (id) VALUES (1);
+        INSERT OR IGNORE INTO welcome_config (id) VALUES (1);
     """)
     # Migrations for existing databases
     try:
@@ -406,6 +414,36 @@ async def _ensure_share_codes():
         )
     if rows:
         await db.commit()
+
+
+# ---- welcome config ----
+
+async def get_welcome_config() -> dict:
+    db = await get_db()
+    cur = await db.execute("SELECT * FROM welcome_config WHERE id = 1")
+    row = await cur.fetchone()
+    return dict(row) if row else {"text": "", "media_file_id": "", "media_type": ""}
+
+
+async def update_welcome_text(text: str):
+    db = await get_db()
+    await db.execute("UPDATE welcome_config SET text = ? WHERE id = 1", (text,))
+    await db.commit()
+
+
+async def update_welcome_media(file_id: str, media_type: str):
+    db = await get_db()
+    await db.execute(
+        "UPDATE welcome_config SET media_file_id = ?, media_type = ? WHERE id = 1",
+        (file_id, media_type),
+    )
+    await db.commit()
+
+
+async def clear_welcome_media():
+    db = await get_db()
+    await db.execute("UPDATE welcome_config SET media_file_id = '', media_type = '' WHERE id = 1")
+    await db.commit()
 
 
 # ---- bot_channels (auto-tracked) ----

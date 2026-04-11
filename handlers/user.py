@@ -178,7 +178,18 @@ async def _send_files(chat_id: int, code_str: str, bot):
 
 
 
-async def _subscription_prompt(not_joined: list[dict], code: str, bot) -> tuple[str, InlineKeyboardMarkup]:
+async def _edit_query_message(query, text: str, reply_markup=None, parse_mode: str | None = None):
+    """Edit a callback query's message — uses caption edit for media messages."""
+    msg = query.message
+    if msg.photo or msg.video or msg.document or msg.audio or msg.animation:
+        await query.edit_message_caption(
+            caption=text[:1024], reply_markup=reply_markup, parse_mode=parse_mode
+        )
+    else:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+
+async def _subscription_prompt(not_joined: list[dict], code: str, bot, back_data: str = "") -> tuple[str, InlineKeyboardMarkup]:
     text = "❌ 请先订阅以下频道后再提取文件：\n"
     buttons = []
     for ch in not_joined:
@@ -197,6 +208,8 @@ async def _subscription_prompt(not_joined: list[dict], code: str, bot) -> tuple[
         else:
             text += f"  · {title}（暂无链接，请搜索频道名加入）\n"
     buttons.append([InlineKeyboardButton("✅ 我已订阅", callback_data=f"check_sub:{code}")])
+    if back_data:
+        buttons.append([InlineKeyboardButton("⬅️ 返回", callback_data=back_data)])
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -215,8 +228,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not code:
-        text, markup = await _build_user_file_list(0)
-        await update.message.reply_text(text, reply_markup=markup)
+        cfg = await db.get_welcome_config()
+        text, markup = await _build_user_file_list(0, welcome_cfg=cfg)
+        file_id = cfg.get("media_file_id", "")
+        media_type = cfg.get("media_type", "")
+        if file_id:
+            send_map = {
+                "photo": context.bot.send_photo,
+                "video": context.bot.send_video,
+                "document": context.bot.send_document,
+            }
+            send_fn = send_map.get(media_type, context.bot.send_document)
+            # Telegram caption limit is 1024 chars; truncate if necessary
+            caption = text[:1024] if text else None
+            await send_fn(update.effective_chat.id, file_id, caption=caption, reply_markup=markup)
+        else:
+            await update.message.reply_text(text, reply_markup=markup)
         return
 
     if _is_rate_limited(user.id):
@@ -280,25 +307,31 @@ async def check_subscription_callback(update: Update, context: ContextTypes.DEFA
     if not_joined:
         names = "、".join(ch.get("title", "未知频道") for ch in not_joined)
         await query.answer(f"❌ 检测不通过，您尚未订阅：{names}", show_alert=True)
-        text, markup = await _subscription_prompt(not_joined, code, context.bot)
-        await query.edit_message_text(text, reply_markup=markup)
+        back_data = f"uf_detail:{group_id}" if (code_row and code_row.get("code_type") == "share") else ""
+        text, markup = await _subscription_prompt(not_joined, code, context.bot, back_data=back_data)
+        await _edit_query_message(query, text, reply_markup=markup)
         return
 
-    await query.edit_message_text("✅ 订阅验证通过，正在发送文件...")
+    await _edit_query_message(query, "✅ 订阅验证通过，正在发送文件...")
     await _send_files(update.effective_chat.id, code, context.bot)
+    cfg = await db.get_welcome_config()
+    text, markup = await _build_user_file_list(0, welcome_cfg=cfg)
+    await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
 
 
 # ---- User file browsing ----
 
-async def _build_user_file_list(page: int) -> tuple[str, InlineKeyboardMarkup | None]:
+async def _build_user_file_list(page: int, welcome_cfg: dict | None = None) -> tuple[str, InlineKeyboardMarkup | None]:
     """Build paginated file list for non-admin users."""
     groups, total = await db.get_file_groups_page(page, PAGE_SIZE, include_hidden=False)
     total_pages = max(1, math.ceil(total / PAGE_SIZE))
 
-    if not groups:
-        return "👋 欢迎使用网盘机器人\n\n暂无可用文件，请通过提取链接获取文件。", None
+    welcome_text = (welcome_cfg or {}).get("text", "") or "👋 欢迎使用网盘机器人"
 
-    text = f"👋 欢迎使用网盘机器人\n\n📋 文件列表 (第 {page + 1}/{total_pages} 页，共 {total} 个)\n"
+    if not groups:
+        return f"{welcome_text}\n\n暂无可用文件，请通过提取链接获取文件。", None
+
+    text = f"{welcome_text}\n\n📋 文件列表 (第 {page + 1}/{total_pages} 页，共 {total} 个)\n"
     buttons = []
     for g in groups:
         desc = g.get("description", "") or f"文件组 #{g['id']}"
@@ -321,8 +354,9 @@ async def user_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     page = int(query.data.split(":")[1])
-    text, markup = await _build_user_file_list(page)
-    await query.edit_message_text(text, reply_markup=markup)
+    cfg = await db.get_welcome_config()
+    text, markup = await _build_user_file_list(page, welcome_cfg=cfg)
+    await _edit_query_message(query, text, reply_markup=markup)
 
 
 async def user_file_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -333,7 +367,7 @@ async def user_file_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = int(query.data.split(":")[1])
     group = await db.get_file_group(group_id)
     if not group or group.get("is_hidden"):
-        await query.edit_message_text("❌ 文件不存在或已隐藏。")
+        await _edit_query_message(query, "❌ 文件不存在或已隐藏。")
         return
 
     files = await db.get_files_by_group(group_id)
@@ -353,7 +387,7 @@ async def user_file_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⬅️ 返回列表", callback_data="uf_list:0")],
     ])
 
-    await query.edit_message_text(text, reply_markup=keyboard)
+    await _edit_query_message(query, text, reply_markup=keyboard)
 
 
 async def _get_or_create_share_code(group_id: int) -> dict:
@@ -380,7 +414,7 @@ async def user_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     group = await db.get_file_group(group_id)
     if not group or group.get("is_hidden"):
-        await query.edit_message_text("❌ 文件不存在或已隐藏。")
+        await _edit_query_message(query, "❌ 文件不存在或已隐藏。")
         return
 
     share_code = await _get_or_create_share_code(group_id)
@@ -389,12 +423,15 @@ async def user_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check subscription
     not_joined = await _check_subscription(user.id, context.bot, group_id)
     if not_joined:
-        text, markup = await _subscription_prompt(not_joined, code_str, context.bot)
-        await query.edit_message_text(text, reply_markup=markup)
+        text, markup = await _subscription_prompt(not_joined, code_str, context.bot, back_data=f"uf_detail:{group_id}")
+        await _edit_query_message(query, text, reply_markup=markup)
         return
 
-    await query.edit_message_text("✅ 正在发送文件...")
+    await _edit_query_message(query, "✅ 正在发送文件...")
     await _send_files(update.effective_chat.id, code_str, context.bot)
+    cfg = await db.get_welcome_config()
+    text, markup = await _build_user_file_list(0, welcome_cfg=cfg)
+    await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
 
 
 async def user_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -405,7 +442,7 @@ async def user_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
     group_id = int(query.data.split(":")[1])
     group = await db.get_file_group(group_id)
     if not group or group.get("is_hidden"):
-        await query.edit_message_text("❌ 文件不存在或已隐藏。")
+        await _edit_query_message(query, "❌ 文件不存在或已隐藏。")
         return
 
     share_code = await _get_or_create_share_code(group_id)
@@ -423,4 +460,4 @@ async def user_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("⬅️ 返回详情", callback_data=f"uf_detail:{group_id}")],
     ])
 
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await _edit_query_message(query, text, reply_markup=keyboard, parse_mode="Markdown")

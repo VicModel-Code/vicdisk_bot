@@ -88,6 +88,14 @@ def main():
     app.add_handler(CallbackQueryHandler(_admin_only(admin.broadcast_confirm), pattern=r"^broadcast_confirm$"))
     app.add_handler(CallbackQueryHandler(_admin_only(admin.stats), pattern=r"^stats$"))
 
+    # Welcome config callbacks (admin only)
+    app.add_handler(CallbackQueryHandler(_admin_only(admin.welcome_menu), pattern=r"^welcome_menu$"))
+    app.add_handler(CallbackQueryHandler(_admin_only(admin.welcome_set_text_start), pattern=r"^welcome_set_text$"))
+    app.add_handler(CallbackQueryHandler(_admin_only(admin.welcome_set_media_start), pattern=r"^welcome_set_media$"))
+    app.add_handler(CallbackQueryHandler(_admin_only(admin.welcome_clear_media), pattern=r"^welcome_clear_media$"))
+    app.add_handler(CallbackQueryHandler(_admin_only(admin.welcome_clear_text), pattern=r"^welcome_clear_text$"))
+    app.add_handler(CallbackQueryHandler(_admin_only(admin.welcome_preview), pattern=r"^welcome_preview$"))
+
     # Code generation callbacks (admin only)
     app.add_handler(CallbackQueryHandler(_admin_only(admin.gen_code_start), pattern=r"^gen_code_start:\d+$"))
     app.add_handler(CallbackQueryHandler(_admin_only(admin.gen_code_qty), pattern=r"^gen_code_qty:\d+:\d+$"))
@@ -171,6 +179,8 @@ async def _handle_admin_message(update: Update, context):
         await admin.handle_admin_file(update, context)
     elif state["state"] == admin.STATE_BROADCAST:
         await admin.handle_admin_broadcast_file(update, context)
+    elif state["state"] == admin.STATE_WELCOME_MEDIA:
+        await admin.handle_welcome_media(update, context)
 
 
 if __name__ == "__main__":

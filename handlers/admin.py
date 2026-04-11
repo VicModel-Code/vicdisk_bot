@@ -29,6 +29,8 @@ STATE_UPLOADING = "uploading"
 STATE_BROADCAST = "broadcast"
 STATE_DESCRIPTION = "description"
 STATE_CH_RENAME = "ch_rename"
+STATE_WELCOME_TEXT = "welcome_text"
+STATE_WELCOME_MEDIA = "welcome_media"
 STATE_GEN_CODE_AMOUNT = "gen_code_amount"
 STATE_GEN_CODE_QUOTA = "gen_code_quota"
 STATE_WM_TEXT = "wm_text"
@@ -109,6 +111,9 @@ async def send_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [
             InlineKeyboardButton("💧 水印设置", callback_data="wm_menu"),
             InlineKeyboardButton("📊 统计信息", callback_data="stats"),
+        ],
+        [
+            InlineKeyboardButton("📝 启动文案", callback_data="welcome_menu"),
         ],
     ])
 
@@ -584,6 +589,14 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 返回频道详情", callback_data=f"ch_detail:{chat_id}")],
         ])
         await update.message.reply_text(f"✅ 名称已更新为：{text}", reply_markup=keyboard)
+
+    elif state["state"] == STATE_WELCOME_TEXT:
+        await db.update_welcome_text(text)
+        _clear_state(user_id)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 返回文案设置", callback_data="welcome_menu")],
+        ])
+        await update.message.reply_text("✅ 启动文案已更新。", reply_markup=keyboard)
 
     elif state["state"] == STATE_GEN_CODE_AMOUNT:
         if not text.isdigit() or int(text) < 1:
@@ -1155,6 +1168,130 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 返回主菜单", callback_data="back_main")],
     ])
     await query.edit_message_text(text, reply_markup=keyboard)
+
+
+# ---- Welcome Config ----
+
+def _welcome_keyboard(cfg: dict) -> InlineKeyboardMarkup:
+    has_text = bool(cfg.get("text"))
+    has_media = bool(cfg.get("media_file_id"))
+    buttons = [
+        [InlineKeyboardButton("✏️ 修改文案", callback_data="welcome_set_text")],
+        [InlineKeyboardButton("🖼 设置媒体", callback_data="welcome_set_media")],
+    ]
+    if has_text:
+        buttons.append([InlineKeyboardButton("🗑 清除文案", callback_data="welcome_clear_text")])
+    if has_media:
+        buttons.append([InlineKeyboardButton("🗑 清除媒体", callback_data="welcome_clear_media")])
+    buttons.append([InlineKeyboardButton("👁 预览", callback_data="welcome_preview")])
+    buttons.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="back_main")])
+    return InlineKeyboardMarkup(buttons)
+
+
+async def welcome_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _clear_state(update.effective_user.id)  # 取消任何进行中的文案/媒体输入状态
+    cfg = await db.get_welcome_config()
+    text_preview = cfg.get("text", "") or "（未设置）"
+    media_status = f"✅ 已设置（{cfg.get('media_type', '')}）" if cfg.get("media_file_id") else "（未设置）"
+    text = (
+        f"📝 启动文案设置\n\n"
+        f"📄 文案内容:\n{text_preview[:200]}\n\n"
+        f"🖼 媒体: {media_status}\n\n"
+        f"普通用户 /start 时会先看到此内容，再展示文件列表。"
+    )
+    await query.edit_message_text(text, reply_markup=_welcome_keyboard(cfg))
+
+
+async def welcome_set_text_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _set_state(update.effective_user.id, STATE_WELCOME_TEXT)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ 取消", callback_data="welcome_menu")],
+    ])
+    await query.edit_message_text("✏️ 请发送启动文案内容（支持换行）：", reply_markup=keyboard)
+
+
+async def welcome_set_media_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    _set_state(update.effective_user.id, STATE_WELCOME_MEDIA)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ 取消", callback_data="welcome_menu")],
+    ])
+    await query.edit_message_text("🖼 请发送媒体文件（图片或视频）：", reply_markup=keyboard)
+
+
+async def handle_welcome_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle media file sent when in STATE_WELCOME_MEDIA."""
+    msg = update.message
+    user_id = update.effective_user.id
+
+    file_id, file_type = None, None
+    if msg.photo:
+        file_id = msg.photo[-1].file_id
+        file_type = "photo"
+    elif msg.video:
+        file_id = msg.video.file_id
+        file_type = "video"
+    elif msg.document:
+        file_id = msg.document.file_id
+        file_type = "document"
+    else:
+        await msg.reply_text("⚠️ 仅支持图片、视频或文件，请重新发送。")
+        return
+
+    await db.update_welcome_media(file_id, file_type)
+    _clear_state(user_id)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔙 返回文案设置", callback_data="welcome_menu")],
+    ])
+    await msg.reply_text("✅ 媒体已设置。", reply_markup=keyboard)
+
+
+async def welcome_clear_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.clear_welcome_media()
+    await welcome_menu(update, context)
+
+
+async def welcome_clear_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.update_welcome_text("")
+    await welcome_menu(update, context)
+
+
+async def welcome_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send a preview of the welcome content to the admin."""
+    query = update.callback_query
+    cfg = await db.get_welcome_config()
+    if not cfg.get("text") and not cfg.get("media_file_id"):
+        await query.answer("⚠️ 尚未设置任何启动文案内容", show_alert=True)
+        return
+    await query.answer("正在发送预览...")
+    chat_id = update.effective_chat.id
+    await _send_welcome_content(chat_id, cfg, context.bot)
+
+
+async def _send_welcome_content(chat_id: int, cfg: dict, bot):
+    """Send welcome text+media to the given chat. Used by admin preview and user /start."""
+    text = cfg.get("text", "")
+    file_id = cfg.get("media_file_id", "")
+    media_type = cfg.get("media_type", "")
+
+    if not text and not file_id:
+        return  # Nothing configured, skip
+
+    if file_id:
+        send_map = {
+            "photo": bot.send_photo,
+            "video": bot.send_video,
+            "document": bot.send_document,
+        }
+        send_fn = send_map.get(media_type, bot.send_document)
+        await send_fn(chat_id, file_id, caption=text or None)
+    else:
+        await bot.send_message(chat_id, text)
 
 
 # ---- Watermark Settings ----
