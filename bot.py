@@ -128,6 +128,14 @@ def main():
     app.add_handler(CallbackQueryHandler(_admin_only(channel.channel_manage_menu), pattern=r"^channel_manage$"))
     app.add_handler(CallbackQueryHandler(_admin_only(channel.channel_detail), pattern=r"^ch_detail:"))
     app.add_handler(CallbackQueryHandler(_admin_only(channel.channel_unbind), pattern=r"^ch_unbind:"))
+    app.add_handler(CallbackQueryHandler(_admin_only(channel.channel_rename_start), pattern=r"^ch_rename:"))
+    app.add_handler(CallbackQueryHandler(_admin_only(channel.channel_rename_cancel), pattern=r"^ch_rename_cancel:"))
+
+    # ---- User file browsing callbacks ----
+    app.add_handler(CallbackQueryHandler(user.user_file_list, pattern=r"^uf_list:\d+$"))
+    app.add_handler(CallbackQueryHandler(user.user_file_detail, pattern=r"^uf_detail:\d+$"))
+    app.add_handler(CallbackQueryHandler(user.user_extract, pattern=r"^uf_extract:\d+$"))
+    app.add_handler(CallbackQueryHandler(user.user_share, pattern=r"^uf_share:\d+$"))
 
     # ---- User subscription check callback ----
     app.add_handler(CallbackQueryHandler(user.check_subscription_callback, pattern=r"^check_sub:"))

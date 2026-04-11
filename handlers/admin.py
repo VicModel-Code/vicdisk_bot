@@ -28,6 +28,7 @@ STATE_UPLOAD_TITLE = "upload_title"
 STATE_UPLOADING = "uploading"
 STATE_BROADCAST = "broadcast"
 STATE_DESCRIPTION = "description"
+STATE_CH_RENAME = "ch_rename"
 STATE_GEN_CODE_AMOUNT = "gen_code_amount"
 STATE_GEN_CODE_QUOTA = "gen_code_quota"
 STATE_WM_TEXT = "wm_text"
@@ -309,9 +310,13 @@ async def upload_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, f in enumerate(files):
         await db.add_file_to_group(group_id, f["file_id"], f["file_type"], f["file_name"], i)
 
-    # Auto-generate a default share code (unlimited uses)
+    # Auto-generate a default extraction code (unlimited uses)
     default_code = await generate_unique_code()
     await db.create_code(group_id, default_code, max_uses=0)
+
+    # Auto-generate a share code for user browsing/sharing
+    share_code_str = await generate_unique_code()
+    await db.create_code(group_id, share_code_str, max_uses=0, code_type="share")
 
     bot_username = context.bot.username
     share_link = f"https://t.me/{bot_username}?start={default_code}"
@@ -571,6 +576,15 @@ async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await update.message.reply_text("✅ 描述已添加。", reply_markup=keyboard)
 
+    elif state["state"] == STATE_CH_RENAME:
+        chat_id = state["chat_id"]
+        await db.update_bot_channel_title(chat_id, text)
+        _clear_state(user_id)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔙 返回频道详情", callback_data=f"ch_detail:{chat_id}")],
+        ])
+        await update.message.reply_text(f"✅ 名称已更新为：{text}", reply_markup=keyboard)
+
     elif state["state"] == STATE_GEN_CODE_AMOUNT:
         if not text.isdigit() or int(text) < 1:
             await update.message.reply_text("⚠️ 请输入一个正整数。")
@@ -768,12 +782,14 @@ async def file_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     active_codes = [c for c in codes if c["max_uses"] == 0 or c["used_count"] < c["max_uses"]]
     total_uses = sum(c["used_count"] for c in codes)
+    share_uses = await db.get_share_extract_count(group_id)
+    normal_uses = total_uses - share_uses
 
     bot_username = context.bot.username
-    # Show the first active unlimited code as default share link
+    # Show the first active unlimited normal code as default share link
     default_link = ""
     for c in codes:
-        if c["max_uses"] == 0:
+        if c["max_uses"] == 0 and c.get("code_type", "normal") != "share":
             default_link = f"https://t.me/{bot_username}?start={c['code']}"
             break
     if not default_link and active_codes:
@@ -791,6 +807,8 @@ async def file_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📎 文件数: {len(files)}\n"
         f"🔗 链接数: {len(codes)} (有效: {len(active_codes)})\n"
         f"📊 总提取次数: {total_uses}\n"
+        f"  ├ 🔗 分享链接: {share_uses} 次\n"
+        f"  └ 🔑 提取码: {normal_uses} 次\n"
         f"📍 状态: {visibility_status}\n"
         f"🛡 权限: {protect_status}\n"
         f"🕐 创建时间: {group['created_at']}\n"

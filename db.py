@@ -62,6 +62,7 @@ async def init_db():
             code        TEXT UNIQUE NOT NULL,
             max_uses    INTEGER NOT NULL DEFAULT 0,
             used_count  INTEGER NOT NULL DEFAULT 0,
+            code_type   TEXT NOT NULL DEFAULT 'normal',
             created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -129,7 +130,18 @@ async def init_db():
         await db.execute("SELECT protect_content FROM file_groups LIMIT 1")
     except Exception:
         await db.execute("ALTER TABLE file_groups ADD COLUMN protect_content BOOLEAN DEFAULT 0")
+    try:
+        await db.execute("SELECT code_type FROM codes LIMIT 1")
+    except Exception:
+        await db.execute("ALTER TABLE codes ADD COLUMN code_type TEXT DEFAULT 'normal'")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_codes_code_type ON codes(group_id, code_type)"
+    )
     await db.commit()
+
+    # Ensure every file_group has a share code
+    await _ensure_share_codes()
+
     await _load_admin_cache()
 
 
@@ -272,12 +284,12 @@ async def toggle_file_group_protect(group_id: int) -> bool:
 
 # ---- codes ----
 
-async def create_code(group_id: int, code: str, max_uses: int) -> int:
-    """Create a new extraction code. max_uses=0 means unlimited."""
+async def create_code(group_id: int, code: str, max_uses: int, code_type: str = "normal") -> int:
+    """Create a new extraction code. max_uses=0 means unlimited. code_type: 'normal' or 'share'."""
     db = await get_db()
     cursor = await db.execute(
-        "INSERT INTO codes (group_id, code, max_uses) VALUES (?, ?, ?)",
-        (group_id, code, max_uses),
+        "INSERT INTO codes (group_id, code, max_uses, code_type) VALUES (?, ?, ?, ?)",
+        (group_id, code, max_uses, code_type),
     )
     await db.commit()
     return cursor.lastrowid
@@ -345,7 +357,67 @@ async def code_exists(code: str) -> bool:
     return await cur.fetchone() is not None
 
 
+async def get_share_code(group_id: int) -> dict | None:
+    """Get the share-type code for a file group."""
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT * FROM codes WHERE group_id = ? AND code_type = 'share' LIMIT 1", (group_id,)
+    )
+    row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def get_share_extract_count(group_id: int) -> int:
+    """Get the total extraction count from share codes for a file group."""
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT COALESCE(SUM(used_count), 0) FROM codes WHERE group_id = ? AND code_type = 'share'",
+        (group_id,),
+    )
+    return (await cur.fetchone())[0]
+
+
+async def get_normal_extract_count(group_id: int) -> int:
+    """Get the total extraction count from normal codes for a file group."""
+    db = await get_db()
+    cur = await db.execute(
+        "SELECT COALESCE(SUM(used_count), 0) FROM codes WHERE group_id = ? AND code_type != 'share'",
+        (group_id,),
+    )
+    return (await cur.fetchone())[0]
+
+
+async def _ensure_share_codes():
+    """Ensure every file_group has a share code. Run during migration."""
+    from utils import generate_unique_code
+    db = await get_db()
+    cur = await db.execute(
+        """SELECT fg.id FROM file_groups fg
+           WHERE NOT EXISTS (
+               SELECT 1 FROM codes c WHERE c.group_id = fg.id AND c.code_type = 'share'
+           )"""
+    )
+    rows = await cur.fetchall()
+    for row in rows:
+        code = await generate_unique_code()
+        await db.execute(
+            "INSERT INTO codes (group_id, code, max_uses, code_type) VALUES (?, ?, 0, 'share')",
+            (row[0], code),
+        )
+    if rows:
+        await db.commit()
+
+
 # ---- bot_channels (auto-tracked) ----
+
+async def update_bot_channel_title(chat_id: int, title: str):
+    db = await get_db()
+    await db.execute(
+        "UPDATE bot_channels SET title=?, updated_at=CURRENT_TIMESTAMP WHERE chat_id=?",
+        (title, chat_id),
+    )
+    await db.commit()
+
 
 async def upsert_bot_channel(chat_id: int, title: str, chat_type: str, invite_link: str = ""):
     db = await get_db()

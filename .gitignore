@@ -17,9 +17,9 @@ env/
 .env
 
 # SQLite database
-# *.db
-# *.db-shm
-# *.db-wal
+*.db
+*.db-shm
+*.db-wal
 
 # IDE
 .vscode/

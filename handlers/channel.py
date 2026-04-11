@@ -2,6 +2,7 @@ from telegram import Update, ChatMemberUpdated, InlineKeyboardButton, InlineKeyb
 from telegram.ext import ContextTypes
 
 import db
+from handlers import admin as _admin_mod
 
 
 def _extract_status_change(chat_member_update: ChatMemberUpdated) -> tuple[bool, bool] | None:
@@ -101,7 +102,10 @@ async def channel_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"链接: {link}\n"
 
     buttons = [
-        [InlineKeyboardButton("🗑 解绑", callback_data=f"ch_unbind:{ch['chat_id']}")],
+        [
+            InlineKeyboardButton("✏️ 修改名称", callback_data=f"ch_rename:{ch['chat_id']}"),
+            InlineKeyboardButton("🗑 解绑", callback_data=f"ch_unbind:{ch['chat_id']}"),
+        ],
         [InlineKeyboardButton("🔙 返回列表", callback_data="channel_manage")],
     ]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -119,5 +123,28 @@ async def channel_unbind(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = [[InlineKeyboardButton("🔙 返回列表", callback_data="channel_manage")]]
     await query.edit_message_text("✅ 已解绑", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def channel_rename_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Prompt admin to type a new name for the channel/group."""
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = int(query.data.split(":")[1])
+    _admin_mod._set_state(update.effective_user.id, _admin_mod.STATE_CH_RENAME, chat_id=chat_id)
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ 取消", callback_data=f"ch_rename_cancel:{chat_id}")],
+    ])
+    await query.edit_message_text("✏️ 请输入新名称：", reply_markup=keyboard)
+
+
+async def channel_rename_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel rename: clear state and return to channel detail."""
+    query = update.callback_query
+    _admin_mod._clear_state(update.effective_user.id)
+    # Reuse channel_detail by faking the callback data
+    query.data = f"ch_detail:{query.data.split(':')[1]}"
+    await channel_detail(update, context)
 
 

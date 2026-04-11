@@ -1,4 +1,5 @@
 import logging
+import math
 import time
 
 from telegram import (
@@ -8,6 +9,8 @@ from telegram import (
 from telegram.ext import ContextTypes
 
 import db
+from config import PAGE_SIZE
+from utils import generate_unique_code
 
 logger = logging.getLogger(__name__)
 
@@ -212,9 +215,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if not code:
-        await update.message.reply_text(
-            "👋 欢迎使用网盘机器人\n\n请通过提取链接获取文件，或直接发送提取码。"
-        )
+        text, markup = await _build_user_file_list(0)
+        await update.message.reply_text(text, reply_markup=markup)
         return
 
     if _is_rate_limited(user.id):
@@ -284,3 +286,141 @@ async def check_subscription_callback(update: Update, context: ContextTypes.DEFA
 
     await query.edit_message_text("✅ 订阅验证通过，正在发送文件...")
     await _send_files(update.effective_chat.id, code, context.bot)
+
+
+# ---- User file browsing ----
+
+async def _build_user_file_list(page: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Build paginated file list for non-admin users."""
+    groups, total = await db.get_file_groups_page(page, PAGE_SIZE, include_hidden=False)
+    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+
+    if not groups:
+        return "👋 欢迎使用网盘机器人\n\n暂无可用文件，请通过提取链接获取文件。", None
+
+    text = f"👋 欢迎使用网盘机器人\n\n📋 文件列表 (第 {page + 1}/{total_pages} 页，共 {total} 个)\n"
+    buttons = []
+    for g in groups:
+        desc = g.get("description", "") or f"文件组 #{g['id']}"
+        label = f"📁 {desc} ({g['file_count']} 个文件)"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"uf_detail:{g['id']}")])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"uf_list:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"uf_list:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def user_file_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle pagination for user file list."""
+    query = update.callback_query
+    await query.answer()
+    page = int(query.data.split(":")[1])
+    text, markup = await _build_user_file_list(page)
+    await query.edit_message_text(text, reply_markup=markup)
+
+
+async def user_file_detail(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show file detail to user with extract and share buttons."""
+    query = update.callback_query
+    await query.answer()
+
+    group_id = int(query.data.split(":")[1])
+    group = await db.get_file_group(group_id)
+    if not group or group.get("is_hidden"):
+        await query.edit_message_text("❌ 文件不存在或已隐藏。")
+        return
+
+    files = await db.get_files_by_group(group_id)
+    desc = group.get("description", "") or "无标题"
+
+    text = (
+        f"📁 {desc}\n\n"
+        f"📄 文件数量: {len(files)}\n"
+        f"📅 上传时间: {group['created_at']}\n"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📥 提取文件", callback_data=f"uf_extract:{group_id}"),
+            InlineKeyboardButton("🔗 分享链接", callback_data=f"uf_share:{group_id}"),
+        ],
+        [InlineKeyboardButton("⬅️ 返回列表", callback_data="uf_list:0")],
+    ])
+
+    await query.edit_message_text(text, reply_markup=keyboard)
+
+
+async def _get_or_create_share_code(group_id: int) -> dict:
+    """Get existing share code or create one for the group."""
+    share_code = await db.get_share_code(group_id)
+    if share_code:
+        return share_code
+    code_str = await generate_unique_code()
+    await db.create_code(group_id, code_str, max_uses=0, code_type="share")
+    return await db.get_code_by_code(code_str)
+
+
+async def user_extract(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User clicks extract from file detail - send files via share code."""
+    query = update.callback_query
+    user = update.effective_user
+
+    if _is_rate_limited(user.id):
+        await query.answer("⚠️ 请求过于频繁，请稍后再试。", show_alert=True)
+        return
+
+    await query.answer()
+    group_id = int(query.data.split(":")[1])
+
+    group = await db.get_file_group(group_id)
+    if not group or group.get("is_hidden"):
+        await query.edit_message_text("❌ 文件不存在或已隐藏。")
+        return
+
+    share_code = await _get_or_create_share_code(group_id)
+    code_str = share_code["code"]
+
+    # Check subscription
+    not_joined = await _check_subscription(user.id, context.bot, group_id)
+    if not_joined:
+        text, markup = await _subscription_prompt(not_joined, code_str, context.bot)
+        await query.edit_message_text(text, reply_markup=markup)
+        return
+
+    await query.edit_message_text("✅ 正在发送文件...")
+    await _send_files(update.effective_chat.id, code_str, context.bot)
+
+
+async def user_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show share link to user."""
+    query = update.callback_query
+    await query.answer()
+
+    group_id = int(query.data.split(":")[1])
+    group = await db.get_file_group(group_id)
+    if not group or group.get("is_hidden"):
+        await query.edit_message_text("❌ 文件不存在或已隐藏。")
+        return
+
+    share_code = await _get_or_create_share_code(group_id)
+    bot_username = context.bot.username
+    link = f"https://t.me/{bot_username}?start={share_code['code']}"
+
+    desc = group.get("description", "") or "无标题"
+    text = (
+        f"📁 {desc}\n\n"
+        f"🔗 分享链接:\n`{link}`\n\n"
+        f"将此链接发送给朋友即可提取文件。"
+    )
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ 返回详情", callback_data=f"uf_detail:{group_id}")],
+    ])
+
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
